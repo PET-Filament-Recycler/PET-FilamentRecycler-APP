@@ -10,6 +10,7 @@ class AppStrings {
   String get controlTitle => isZh ? '控制面板' : 'Control Panel';
   String get connect => isZh ? '連線' : 'Connect';
   String get disconnect => isZh ? '斷線' : 'Disconnect';
+  String get disconnecting => isZh ? '斷線中...' : 'Disconnecting...';
   String get refresh => isZh ? '掃描裝置' : 'Scan Devices';
   String get scanning => isZh ? '掃描中...' : 'Scanning...';
   String get selectDevice => isZh ? '請選擇裝置' : 'Select a device';
@@ -17,7 +18,15 @@ class AppStrings {
   String get connecting => isZh ? '連線中...' : 'Connecting...';
   String get connected => isZh ? '已連線' : 'Connected';
   String get notConnected => isZh ? '未連線' : 'Not Connected';
-  String get connectionLost => isZh ? '連線中斷' : 'Connection Lost';
+  String get connectionLost => isZh ? '連線中斷' : 'Connection lost';
+  String connectionFailed(String detail) =>
+      isZh ? '連線失敗：$detail' : 'Connection failed: $detail';
+  String scanError(String detail) =>
+      isZh ? '掃描錯誤：$detail' : 'Scan error: $detail';
+  String fallbackScanError(String detail) =>
+      isZh ? '備用掃描錯誤：$detail' : 'Fallback scan error: $detail';
+  String sendFailed(String detail) =>
+      isZh ? '送出失敗：$detail' : 'Send failed: $detail';
   String get bleConnected => isZh ? 'BLE 已連線' : 'BLE Connected';
   String get enableBluetooth => isZh ? '請啟用藍牙' : 'Please enable Bluetooth';
   String get permissionDenied => isZh ? '權限被拒，無法使用藍牙' : 'Permission denied';

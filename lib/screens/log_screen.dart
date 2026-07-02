@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../services/ble_service.dart';
 import '../services/database_service.dart';
 import '../services/locale_service.dart';
 import '../models/log_entry.dart';
@@ -14,8 +15,25 @@ class LogScreen extends StatefulWidget {
 
 class _LogScreenState extends State<LogScreen> {
   final DatabaseService _db = DatabaseService();
+  BleService? _ble;
   List<LogEntry> _logs = [];
   bool _loading = true;
+  bool _logListenerAttached = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_logListenerAttached) return;
+
+    _ble = context.read<BleService>();
+    _ble!.onLogInserted = _onLogInserted;
+    _logListenerAttached = true;
+  }
+
+  void _onLogInserted() {
+    if (!mounted) return;
+    _loadLogs();
+  }
 
   @override
   void initState() {
@@ -64,6 +82,14 @@ class _LogScreenState extends State<LogScreen> {
         ).showSnackBar(SnackBar(content: Text(strings.logsCleared)));
       }
     }
+  }
+
+  @override
+  void dispose() {
+    if (_logListenerAttached && _ble?.onLogInserted == _onLogInserted) {
+      _ble!.onLogInserted = null;
+    }
+    super.dispose();
   }
 
   @override
@@ -138,7 +164,7 @@ class _LogTile extends StatelessWidget {
       ),
       title: Text(log.message, style: const TextStyle(fontSize: 14)),
       subtitle: Text(
-        log.timestamp,
+        log.hasDevice ? '${log.timestamp} · ${log.device}' : log.timestamp,
         style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
       ),
     );

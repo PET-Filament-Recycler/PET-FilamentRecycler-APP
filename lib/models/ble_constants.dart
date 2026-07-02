@@ -21,7 +21,6 @@ class BleConstants {
   // ---- Timing ----
   static const int scanTimeoutMs = 8000;
   static const int connectTimeoutMs = 15000;
-  static const int statusPollIntervalMs = 3000;
   static const int requestedMtu = 517;
 
   // ---- Commands (sent to Arduino) ----

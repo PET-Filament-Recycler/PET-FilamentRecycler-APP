@@ -1,15 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'services/ble_service.dart';
 import 'services/locale_service.dart';
 import 'screens/home_screen.dart';
 
-void main() {
-  runApp(
-    ChangeNotifierProvider(
-      create: (_) => LocaleService(),
-      child: const PetFrApp(),
-    ),
+/// Root widget used by [main] and integration tests.
+Widget buildPetFrApp() {
+  return MultiProvider(
+    providers: [
+      ChangeNotifierProvider(create: (_) => LocaleService()),
+      ChangeNotifierProvider(create: (_) => BleService()),
+    ],
+    child: const PetFrApp(),
   );
+}
+
+void main() {
+  runApp(buildPetFrApp());
 }
 
 class PetFrApp extends StatelessWidget {

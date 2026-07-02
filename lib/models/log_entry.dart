@@ -26,7 +26,7 @@ class LogEntry {
   };
 
   factory LogEntry.fromMap(Map<String, dynamic> map) => LogEntry(
-    id: map['id'] as int?,
+    id: map['_id'] as int?,
     timestamp: map['timestamp'] as String,
     direction: map['direction'] as String,
     message: map['message'] as String,
