@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../services/ble_service.dart';
@@ -19,7 +20,7 @@ class _ControlScreenState extends State<ControlScreen> {
   late BleService _ble;
   final TextEditingController _tempCtrl = TextEditingController();
   final TextEditingController _speedCtrl = TextEditingController();
-  MachineState _machineState = MachineState();
+  final MachineState _machineState = MachineState();
   String _errorMsg = '';
   ScanResult? _selectedDevice;
 
@@ -31,12 +32,16 @@ class _ControlScreenState extends State<ControlScreen> {
       if (!connected) {
         setState(() {
           _machineState.reset();
-          _errorMsg = '';
         });
       }
     };
     _ble.onError = (err) => setState(() => _errorMsg = err);
-    _ble.onStatusUpdate = (state) => setState(() => _machineState = state);
+    _ble.onStatusUpdate = (state) => setState(() {
+      // Status updates may be partial; keep previous values when absent.
+      if (state.hasTemperature) _machineState.temperature = state.temperature;
+      if (state.hasSpeed) _machineState.speed = state.speed;
+      if (state.hasStatus) _machineState.status = state.status;
+    });
 
     WidgetsBinding.instance.addPostFrameCallback((_) => _startScan());
   }
@@ -50,6 +55,7 @@ class _ControlScreenState extends State<ControlScreen> {
 
   Future<void> _connect() async {
     if (_selectedDevice == null) return;
+    setState(() => _errorMsg = '');
     await _ble.connect(_selectedDevice!.device);
   }
 
@@ -57,6 +63,7 @@ class _ControlScreenState extends State<ControlScreen> {
     await _ble.disconnect();
     setState(() {
       _machineState.reset();
+      _errorMsg = '';
     });
   }
 
@@ -104,9 +111,26 @@ class _ControlScreenState extends State<ControlScreen> {
     );
   }
 
+  String _localizeError(String err, AppStrings strings) {
+    switch (err) {
+      case BleService.errBluetoothOff:
+        return strings.enableBluetooth;
+      case BleService.errConnectionLost:
+        return strings.connectionLost;
+      case BleService.errNotConnected:
+        return strings.notConnected;
+      case BleService.errPermissionDenied:
+        return strings.permissionDenied;
+    }
+    if (err.toLowerCase().contains('permission')) {
+      return strings.permissionDenied;
+    }
+    return err;
+  }
+
   @override
   void dispose() {
-    _ble.stopScan();
+    _ble.dispose();
     _tempCtrl.dispose();
     _speedCtrl.dispose();
     super.dispose();
@@ -132,44 +156,40 @@ class _ControlScreenState extends State<ControlScreen> {
       body: ListenableBuilder(
         listenable: _ble,
         builder: (context, _) {
-          return Padding(
+          return ListView(
             padding: const EdgeInsets.all(16.0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // ---- Connection Status ----
-                _buildConnectionBar(strings),
-                const SizedBox(height: 12),
+            children: [
+              // ---- Connection Status ----
+              _buildConnectionBar(strings),
+              const SizedBox(height: 12),
 
-                // ---- Device Selector ----
-                _buildDeviceSelector(strings),
+              // ---- Device Selector ----
+              _buildDeviceSelector(strings),
+              const Divider(height: 24),
+
+              // ---- Status Display ----
+              _buildStatusDisplay(strings),
+
+              // ---- Controls ----
+              if (_ble.isConnected) ...[
                 const Divider(height: 24),
+                _buildControls(strings),
+                const SizedBox(height: 24),
+                _buildActionButtons(strings),
+              ],
 
-                // ---- Status Display ----
-                _buildStatusDisplay(strings),
-                const Divider(height: 24),
-
-                // ---- Controls ----
-                if (_ble.isConnected) ...[
-                  _buildControls(strings),
-                  const Spacer(),
-                  _buildActionButtons(strings),
-                ] else
-                  const Spacer(),
-
-                // ---- Error ----
-                if (_errorMsg.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text(
-                      _errorMsg,
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                      ),
+              // ---- Error ----
+              if (_errorMsg.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Text(
+                    _localizeError(_errorMsg, strings),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
                     ),
                   ),
-              ],
-            ),
+                ),
+            ],
           );
         },
       ),
@@ -206,6 +226,8 @@ class _ControlScreenState extends State<ControlScreen> {
   Widget _buildDeviceSelector(AppStrings strings) {
     final devices = _ble.scanResults;
     final scanning = _ble.isScanning;
+    final connecting = _ble.isConnecting;
+    final busy = _ble.isConnected || connecting;
 
     return Row(
       children: [
@@ -213,7 +235,11 @@ class _ControlScreenState extends State<ControlScreen> {
           child: DropdownButtonFormField<ScanResult>(
             initialValue: _selectedDevice,
             isExpanded: true,
-            hint: Text(scanning ? strings.scanning : strings.selectDevice),
+            hint: Text(
+              scanning
+                  ? strings.scanning
+                  : (devices.isEmpty ? strings.noDevices : strings.selectDevice),
+            ),
             items: devices.map((r) {
               final name = r.device.platformName;
               return DropdownMenuItem(
@@ -224,7 +250,7 @@ class _ControlScreenState extends State<ControlScreen> {
                 ),
               );
             }).toList(),
-            onChanged: _ble.isConnected
+            onChanged: busy
                 ? null
                 : (val) => setState(() => _selectedDevice = val),
             decoration: const InputDecoration(
@@ -238,7 +264,7 @@ class _ControlScreenState extends State<ControlScreen> {
         ),
         const SizedBox(width: 8),
         IconButton(
-          onPressed: _ble.isConnected ? null : _startScan,
+          onPressed: busy ? null : _startScan,
           icon: scanning
               ? const SizedBox(
                   width: 20,
@@ -249,11 +275,15 @@ class _ControlScreenState extends State<ControlScreen> {
           tooltip: strings.refresh,
         ),
         IconButton(
-          onPressed: (_selectedDevice != null && !_ble.isConnected)
-              ? _connect
-              : null,
-          icon: const Icon(Icons.bluetooth),
-          tooltip: strings.connect,
+          onPressed: (_selectedDevice != null && !busy) ? _connect : null,
+          icon: connecting
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.bluetooth),
+          tooltip: connecting ? strings.connecting : strings.connect,
         ),
       ],
     );
@@ -316,6 +346,7 @@ class _ControlScreenState extends State<ControlScreen> {
           child: TextField(
             controller: _tempCtrl,
             keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
             decoration: InputDecoration(
               labelText: strings.temperature,
               suffixText: strings.tempPlaceholder,
@@ -328,6 +359,7 @@ class _ControlScreenState extends State<ControlScreen> {
           child: TextField(
             controller: _speedCtrl,
             keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
             decoration: InputDecoration(
               labelText: strings.speed,
               suffixText: strings.speedPlaceholder,
@@ -344,10 +376,7 @@ class _ControlScreenState extends State<ControlScreen> {
       children: [
         Expanded(
           child: FilledButton.icon(
-            onPressed: () {
-              _ble.sendCommand(BleConstants.cmdStart);
-              setState(() => _machineState.status = MachineState.statusOn);
-            },
+            onPressed: () => _ble.sendCommand(BleConstants.cmdStart),
             icon: const Icon(Icons.play_arrow),
             label: Text(strings.start),
             style: FilledButton.styleFrom(
@@ -360,10 +389,7 @@ class _ControlScreenState extends State<ControlScreen> {
         const SizedBox(width: 8),
         Expanded(
           child: FilledButton.icon(
-            onPressed: () {
-              _ble.sendCommand(BleConstants.cmdStop);
-              setState(() => _machineState.status = MachineState.statusOff);
-            },
+            onPressed: () => _ble.sendCommand(BleConstants.cmdStop),
             icon: const Icon(Icons.stop),
             label: Text(strings.stop),
             style: FilledButton.styleFrom(
