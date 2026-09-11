@@ -50,6 +50,10 @@ class AppStrings {
   String get logsCleared => isZh ? '日誌已清除' : 'Logs cleared';
   String get logDirectionIn => isZh ? '接收' : 'IN';
   String get logDirectionOut => isZh ? '送出' : 'OUT';
+  String get exportLogs => isZh ? '匯出日誌' : 'Export Logs';
+  String get copiedToClipboard => isZh ? '已複製' : 'Copied';
+  String get filterAll => isZh ? '全部' : 'All';
+  String get filterEvents => isZh ? '事件' : 'Events';
   String get alreadyConnectedNoScan =>
       isZh ? '已連線，無法掃描' : 'Already connected, cannot scan';
   String get refreshingDevices => isZh ? '刷新裝置中...' : 'Refreshing...';

@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'services/app_logger.dart';
 import 'services/locale_service.dart';
 import 'screens/home_screen.dart';
 
 void main() {
+  AppLogger.info('App started');
   runApp(
     ChangeNotifierProvider(
       create: (_) => LocaleService(),
