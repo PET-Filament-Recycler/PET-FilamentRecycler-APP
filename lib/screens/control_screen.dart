@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import '../services/app_logger.dart';
 import '../services/ble_service.dart';
 import '../services/locale_service.dart';
 import '../models/ble_constants.dart';
@@ -143,6 +145,7 @@ class _ControlScreenState extends State<ControlScreen>
     if (!mounted) return;
 
     if (!granted) {
+      AppLogger.warn('BLE permissions denied', category: 'UI');
       setState(() {
         _clearErrors();
         _permissionDenied = true;
@@ -150,6 +153,7 @@ class _ControlScreenState extends State<ControlScreen>
       return;
     }
 
+    AppLogger.info('Scan started', category: 'UI');
     setState(() {
       _clearErrors();
       _selectedDevice = null;
@@ -176,6 +180,11 @@ class _ControlScreenState extends State<ControlScreen>
 
   Future<void> _connect() async {
     if (!_sessionReady || _selectedDevice == null) return;
+    AppLogger.info(
+      'Connect pressed: ${_selectedDevice!.device.platformName} '
+      '(${_selectedDevice!.device.remoteId})',
+      category: 'UI',
+    );
     setState(() {
       _clearErrors();
       _isConnecting = true;
@@ -202,15 +211,18 @@ class _ControlScreenState extends State<ControlScreen>
 
   Future<void> _disconnect() async {
     if (!_sessionReady) return;
+    AppLogger.info('Disconnect pressed', category: 'UI');
     _suppressAutoScan = true;
     await _ble.disconnect();
     setState(() {
       _machineState.reset();
+      _clearErrors();
     });
   }
 
   Future<void> _sendMachineCommand(String command) async {
     if (!_sessionReady) return;
+    AppLogger.info('$command pressed', category: 'UI');
     final sent = await _ble.sendCommand(command);
     if (!sent || !mounted) return;
     await _ble.sendCommand(BleConstants.cmdGetStatus);
@@ -222,6 +234,7 @@ class _ControlScreenState extends State<ControlScreen>
     final speedText = _speedCtrl.text.trim();
 
     if (tempText.isEmpty || speedText.isEmpty) {
+      AppLogger.warn('Save pressed with empty input', category: 'UI');
       _showSnack(strings.enterTempAndSpeed);
       return;
     }
@@ -230,16 +243,22 @@ class _ControlScreenState extends State<ControlScreen>
     final speed = int.tryParse(speedText);
 
     if (temp == null || speed == null) {
+      AppLogger.warn(
+        'Invalid input: temp="$tempText" speed="$speedText"',
+        category: 'UI',
+      );
       _showSnack(strings.invalidNumber);
       return;
     }
     if (temp < BleConstants.tempMin || temp > BleConstants.tempMax) {
+      AppLogger.warn('Temperature out of range: $temp', category: 'UI');
       _showSnack(
         strings.tempRangeError(BleConstants.tempMin, BleConstants.tempMax),
       );
       return;
     }
     if (speed < BleConstants.speedMin || speed > BleConstants.speedMax) {
+      AppLogger.warn('Speed out of range: $speed', category: 'UI');
       _showSnack(
         strings.speedRangeError(BleConstants.speedMin, BleConstants.speedMax),
       );
@@ -275,6 +294,7 @@ class _ControlScreenState extends State<ControlScreen>
     await _ble.sendCommand(BleConstants.cmdGetStatus, reportError: false);
 
     if (!mounted) return;
+    AppLogger.info('Settings sent: temp=$temp speed=$speed', category: 'UI');
     setState(() => _isSaving = false);
     _showSnack(strings.settingsSent);
   }
@@ -333,6 +353,7 @@ class _ControlScreenState extends State<ControlScreen>
 
   @override
   void dispose() {
+    AppLogger.info('Control screen closed', category: 'UI');
     WidgetsBinding.instance.removeObserver(this);
     if (_sessionReady) {
       _ble.removeListener(_onBleUpdated);
@@ -379,7 +400,15 @@ class _ControlScreenState extends State<ControlScreen>
                 locale.isZh ? Icons.language : Icons.language_outlined,
               ),
               tooltip: locale.isZh ? 'Switch to English' : '切換至中文',
-              onPressed: _isLeaving ? null : () => locale.toggle(),
+              onPressed: _isLeaving
+                  ? null
+                  : () {
+                      AppLogger.info(
+                        'Language toggled to ${locale.isZh ? "en" : "zh"}',
+                        category: 'UI',
+                      );
+                      locale.toggle();
+                    },
             ),
           ],
         ),
@@ -537,7 +566,16 @@ class _ControlScreenState extends State<ControlScreen>
               );
             }).toList(),
             onChanged: controlsEnabled
-                ? (val) => setState(() => _selectedDevice = val)
+                ? (val) {
+                    if (val != null) {
+                      AppLogger.info(
+                        'Device selected: ${val.device.platformName} '
+                        '(${val.device.remoteId})',
+                        category: 'UI',
+                      );
+                    }
+                    setState(() => _selectedDevice = val);
+                  }
                 : null,
             decoration: const InputDecoration(
               border: OutlineInputBorder(),
@@ -652,6 +690,7 @@ class _ControlScreenState extends State<ControlScreen>
           child: TextField(
             controller: _tempCtrl,
             keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
             decoration: InputDecoration(
               labelText: strings.temperature,
               suffixText: strings.tempPlaceholder,
@@ -664,6 +703,7 @@ class _ControlScreenState extends State<ControlScreen>
           child: TextField(
             controller: _speedCtrl,
             keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
             decoration: InputDecoration(
               labelText: strings.speed,
               suffixText: strings.speedPlaceholder,
@@ -723,6 +763,7 @@ class _ControlScreenState extends State<ControlScreen>
         const SizedBox(width: 8),
         IconButton(
           onPressed: () {
+            AppLogger.info('Opened log screen', category: 'UI');
             Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const LogScreen()),

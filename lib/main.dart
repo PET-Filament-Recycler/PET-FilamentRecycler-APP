@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'services/app_logger.dart';
 import 'services/ble_service.dart';
 import 'services/locale_service.dart';
 import 'screens/home_screen.dart';
@@ -16,6 +17,7 @@ Widget buildPetFrApp() {
 }
 
 void main() {
+  AppLogger.info('App started');
   runApp(buildPetFrApp());
 }
 

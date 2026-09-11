@@ -1,11 +1,17 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:petfr/screens/home_screen.dart';
+import 'package:petfr/services/app_logger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'test_helpers.dart';
 
 void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
+    AppLogger.enabled = false;
+  });
+
+  tearDown(() {
+    AppLogger.enabled = true;
   });
 
   testWidgets('App renders home screen', (WidgetTester tester) async {

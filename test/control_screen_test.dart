@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:petfr/models/ble_error.dart';
 import 'package:petfr/models/machine_state.dart';
+import 'package:petfr/services/app_logger.dart';
 import 'package:petfr/services/ble_service.dart';
 import 'package:petfr/services/permission_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -13,10 +14,12 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     BleService.platformCallsEnabled = false;
+    AppLogger.enabled = false;
   });
 
   tearDown(() {
     BleService.platformCallsEnabled = true;
+    AppLogger.enabled = true;
   });
 
   group('ControlScreen status display', () {

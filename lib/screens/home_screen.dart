@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../services/app_logger.dart';
 import '../services/locale_service.dart';
 import '../l10n/app_strings.dart';
 import 'control_screen.dart';
@@ -20,7 +21,13 @@ class HomeScreen extends StatelessWidget {
           IconButton(
             icon: Icon(locale.isZh ? Icons.language : Icons.language_outlined),
             tooltip: locale.isZh ? 'Switch to English' : '切換至中文',
-            onPressed: () => locale.toggle(),
+            onPressed: () {
+              AppLogger.info(
+                'Language toggled to ${locale.isZh ? "en" : "zh"}',
+                category: 'UI',
+              );
+              locale.toggle();
+            },
           ),
         ],
       ),
@@ -44,6 +51,7 @@ class HomeScreen extends StatelessWidget {
               const SizedBox(height: 48),
               FilledButton.icon(
                 onPressed: () {
+                  AppLogger.info('Navigated to control panel', category: 'UI');
                   Navigator.push(
                     context,
                     MaterialPageRoute(builder: (_) => const ControlScreen()),

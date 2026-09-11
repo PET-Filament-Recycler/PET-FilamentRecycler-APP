@@ -44,7 +44,7 @@ void main() {
       expect(service.isConnected, isTrue);
       expect(connected, isTrue);
       expect(adapter.connectCalls, 1);
-      expect(adapter.lastWritten, utf8.encode(BleConstants.cmdGetStatus));
+      expect(adapter.lastWritten, utf8.encode('${BleConstants.cmdGetStatus}\n'));
     });
 
     test('connect failure emits connectionFailed', () async {

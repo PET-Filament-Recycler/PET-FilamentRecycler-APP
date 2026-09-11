@@ -7,6 +7,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../models/ble_constants.dart';
 import '../models/ble_error.dart';
 import '../models/machine_state.dart';
+import 'app_logger.dart';
 import 'ble_adapter.dart';
 import 'database_service.dart';
 
@@ -56,6 +57,7 @@ class BleService extends ChangeNotifier {
   bool _isConnected = false;
   bool _released = false;
   bool _fallbackScanAttempted = false;
+  Timer? _statusPollTimer;
 
   StreamSubscription<List<ScanResult>>? _scanResultsSubscription;
   StreamSubscription<bool>? _isScanningSubscription;
@@ -84,7 +86,10 @@ class BleService extends ChangeNotifier {
 
   // ---- Scanning ----
   Future<void> startScan() async {
-    if (_isScanning) return;
+    if (_isScanning) {
+      AppLogger.info('Scan skipped: already scanning', category: 'BLE');
+      return;
+    }
 
     await _cancelScanSubscriptions();
     _fallbackScanAttempted = false;
@@ -117,6 +122,10 @@ class BleService extends ChangeNotifier {
       _isScanningSubscription = _adapter.isScanning.listen((scanning) {
         if (!scanning && _isScanning) {
           _isScanning = false;
+          AppLogger.info(
+            'Scan finished: ${_scanResults.length} device(s) found',
+            category: 'BLE',
+          );
           _notifyListeners();
 
           if (_scanResults.isEmpty &&
@@ -168,7 +177,9 @@ class BleService extends ChangeNotifier {
     await _cancelScanSubscriptions();
     try {
       await _adapter.stopScan();
-    } catch (_) {}
+    } catch (e) {
+      AppLogger.warn('Stop scan failed: $e', category: 'BLE');
+    }
     _isScanning = false;
     _notifyListeners();
   }
@@ -182,6 +193,10 @@ class BleService extends ChangeNotifier {
 
   // ---- Connection ----
   Future<void> connect(BluetoothDevice device) async {
+    if (_isConnected) {
+      AppLogger.info('Connect skipped: already connected', category: 'BLE');
+      return;
+    }
     await stopScan();
 
     if (!await _adapter.isBluetoothEnabled()) {
@@ -202,10 +217,12 @@ class BleService extends ChangeNotifier {
       await _attachConnection(connection);
 
       _isConnected = true;
+      AppLogger.info('Connected to $_connectedDeviceLabel', category: 'BLE');
       _notifyListeners();
       onConnectionChanged?.call(true);
 
       sendCommand(BleConstants.cmdGetStatus, reportError: false);
+      _startStatusPolling();
     } catch (e) {
       _isConnected = false;
       _notifyListeners();
@@ -245,6 +262,8 @@ class BleService extends ChangeNotifier {
   }
 
   Future<void> disconnect() async {
+    final wasConnected = _isConnected;
+    _stopStatusPolling();
     _isConnected = false;
 
     await _connectionSubscription?.cancel();
@@ -256,11 +275,15 @@ class BleService extends ChangeNotifier {
       if (device != null) {
         await _adapter.disconnectDevice(device);
       }
-    } catch (_) {}
+    } catch (e) {
+      AppLogger.warn('Device disconnect failed: $e', category: 'BLE');
+    }
 
     _connectedDevice = null;
     _writeControl = null;
     _connectedDeviceLabel = '';
+
+    if (wasConnected) AppLogger.info('Disconnected', category: 'BLE');
 
     _notifyListeners();
     onConnectionChanged?.call(false);
@@ -285,6 +308,7 @@ class BleService extends ChangeNotifier {
   void _handleUnexpectedDisconnect() {
     if (!_isConnected) return;
 
+    _stopStatusPolling();
     _isConnected = false;
     _connectedDevice = null;
     _writeControl = null;
@@ -337,7 +361,14 @@ class BleService extends ChangeNotifier {
     }
 
     if (isStatus) {
-      onStatusUpdate?.call(StatusParser.parse(data));
+      final state = StatusParser.parse(data);
+      if (!state.hasTemperature && !state.hasSpeed && !state.hasStatus) {
+        AppLogger.warn(
+          'Unrecognized status payload: "$data"',
+          category: 'BLE',
+        );
+      }
+      onStatusUpdate?.call(state);
     }
   }
 
@@ -361,7 +392,7 @@ class BleService extends ChangeNotifier {
     }
 
     try {
-      final bytes = utf8.encode(command);
+      final bytes = utf8.encode('$command\n');
       await _writeControl!(bytes);
       try {
         await _recordLog(direction: 'OUT', message: command);
@@ -385,7 +416,29 @@ class BleService extends ChangeNotifier {
     return sendCommand('${BleConstants.cmdSetSpeedPrefix}$speed');
   }
 
+  // ---- Status Polling ----
+  void _startStatusPolling() {
+    _stopStatusPolling();
+    _statusPollTimer = Timer.periodic(
+      Duration(milliseconds: BleConstants.statusPollIntervalMs),
+      (_) {
+        if (_isConnected) {
+          sendCommand(BleConstants.cmdGetStatus, reportError: false);
+        }
+      },
+    );
+  }
+
+  void _stopStatusPolling() {
+    _statusPollTimer?.cancel();
+    _statusPollTimer = null;
+  }
+
   void _emitError(BleErrorCode code, {String? detail}) {
+    AppLogger.error(
+      detail != null ? '${code.name}: $detail' : code.name,
+      category: 'BLE',
+    );
     onError?.call(code, detail: detail);
   }
 
@@ -406,6 +459,7 @@ class BleService extends ChangeNotifier {
   /// disposing when a BLE session may still be active.
   @override
   void dispose() {
+    _stopStatusPolling();
     clearUiCallbacks();
     onLogInserted = null;
     super.dispose();
