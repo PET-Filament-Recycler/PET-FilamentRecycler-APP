@@ -257,6 +257,15 @@ class _LogTile extends StatelessWidget {
       }
     }
 
+    final String subtitle;
+    if (log.isBleTraffic) {
+      subtitle = log.hasDevice
+          ? '${log.timestamp} · ${log.device}'
+          : log.timestamp;
+    } else {
+      subtitle = '${log.timestamp} · ${log.category}';
+    }
+
     return ListTile(
       dense: true,
       onLongPress: onLongPress,
@@ -277,7 +286,7 @@ class _LogTile extends StatelessWidget {
       ),
       title: Text(log.message, style: const TextStyle(fontSize: 14)),
       subtitle: Text(
-        log.isBleTraffic ? log.timestamp : '${log.timestamp} · ${log.category}',
+        subtitle,
         style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
       ),
     );

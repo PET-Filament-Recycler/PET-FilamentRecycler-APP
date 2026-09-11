@@ -1,240 +1,264 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import 'package:permission_handler/permission_handler.dart';
+
 import '../models/ble_constants.dart';
+import '../models/ble_error.dart';
 import '../models/machine_state.dart';
 import 'app_logger.dart';
+import 'ble_adapter.dart';
 import 'database_service.dart';
 
 /// Callback interface for BLE events.
 typedef BleDeviceFoundCallback = void Function(List<ScanResult> devices);
 typedef BleConnectionCallback = void Function(bool connected);
-typedef BleErrorCallback = void Function(String error);
+typedef BleErrorCallback = void Function(
+  BleErrorCode code, {
+  String? detail,
+});
 typedef BleDataCallback = void Function(String uuid, String data);
 typedef BleStatusCallback = void Function(MachineState state);
+typedef BleLogInsertedCallback = void Function();
+typedef BleLogRecorder = Future<void> Function({
+  required String direction,
+  required String message,
+  required String device,
+});
 
 /// Manages all BLE operations: scanning, connecting, data transfer.
 class BleService extends ChangeNotifier {
-  /// Error keys emitted via [onError]; UI maps them to localized strings.
-  static const String errBluetoothOff = 'BLUETOOTH_OFF';
-  static const String errConnectionLost = 'CONNECTION_LOST';
-  static const String errNotConnected = 'NOT_CONNECTED';
-  static const String errPermissionDenied = 'PERMISSION_DENIED';
+  /// When false, skips platform BLE cleanup (widget tests).
+  @visibleForTesting
+  static bool platformCallsEnabled = true;
 
+  BleService({
+    BleAdapter? adapter,
+    this._logRecorder,
+  }) : _adapter = adapter ?? const FlutterBlueBleAdapter();
+
+  final BleAdapter _adapter;
+  final BleLogRecorder? _logRecorder;
   final DatabaseService _db = DatabaseService();
 
   BleDeviceFoundCallback? onDeviceFound;
   BleConnectionCallback? onConnectionChanged;
   BleErrorCallback? onError;
   BleStatusCallback? onStatusUpdate;
+  BleLogInsertedCallback? onLogInserted;
 
   BluetoothDevice? _connectedDevice;
-  BluetoothCharacteristic? _controlChar;
+  Future<void> Function(List<int> bytes)? _writeControl;
+  String _connectedDeviceLabel = '';
 
   final List<ScanResult> _scanResults = [];
   bool _isScanning = false;
   bool _isConnected = false;
-  bool _isConnecting = false;
+  bool _released = false;
+  bool _fallbackScanAttempted = false;
   Timer? _statusPollTimer;
 
-  StreamSubscription<List<ScanResult>>? _scanResultsSub;
-  StreamSubscription<bool>? _isScanningSub;
-  StreamSubscription<BluetoothConnectionState>? _connectionStateSub;
-  final List<StreamSubscription<List<int>>> _notifySubs = [];
+  StreamSubscription<List<ScanResult>>? _scanResultsSubscription;
+  StreamSubscription<bool>? _isScanningSubscription;
+  StreamSubscription<BluetoothConnectionState>? _connectionSubscription;
+  final List<StreamSubscription<List<int>>> _notifySubscriptions = [];
 
   // ---- Getters ----
   List<ScanResult> get scanResults => List.unmodifiable(_scanResults);
   bool get isScanning => _isScanning;
   bool get isConnected => _isConnected;
-  bool get isConnecting => _isConnecting;
+  bool get isReleased => _released;
   BluetoothDevice? get connectedDevice => _connectedDevice;
+
+  /// Marks a new control-screen session. Call when entering the control panel.
+  void beginSession() {
+    _released = false;
+  }
+
+  /// Detaches UI callbacks so a disposed screen cannot receive events.
+  void clearUiCallbacks() {
+    onDeviceFound = null;
+    onConnectionChanged = null;
+    onError = null;
+    onStatusUpdate = null;
+  }
 
   // ---- Scanning ----
   Future<void> startScan() async {
-    if (_isScanning || _isConnected || _isConnecting) {
-      AppLogger.info(
-        'Scan skipped '
-        '(scanning=$_isScanning connected=$_isConnected '
-        'connecting=$_isConnecting)',
-        category: 'BLE',
-      );
+    if (_isScanning) {
+      AppLogger.info('Scan skipped: already scanning', category: 'BLE');
       return;
     }
 
     await _cancelScanSubscriptions();
-
-    if (Platform.isAndroid && !await _requestBlePermissions()) {
-      _emitError(errPermissionDenied);
-      return;
-    }
-
-    if (FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on) {
-      _emitError(errBluetoothOff);
-      return;
-    }
-
+    _fallbackScanAttempted = false;
     _scanResults.clear();
-    _isScanning = true;
-    notifyListeners();
+    _notifyListeners();
+
+    if (!await _adapter.isBluetoothEnabled()) {
+      _emitError(BleErrorCode.bluetoothOff);
+      return;
+    }
 
     try {
-      _scanResultsSub = FlutterBluePlus.scanResults.listen((results) {
-        // Filter for PET-Recycle devices
+      _isScanning = true;
+      _notifyListeners();
+
+      await _adapter.startScan(
+        timeout: Duration(milliseconds: BleConstants.scanTimeoutMs),
+        withServices: [Guid(BleConstants.serviceUuid)],
+      );
+
+      _scanResultsSubscription = _adapter.scanResults.listen((results) {
+        final filtered = results.where(_shouldKeepDevice).toList();
         _scanResults
           ..clear()
-          ..addAll(
-            results.where((r) {
-              final name = r.device.platformName;
-              return name.isNotEmpty &&
-                  name.startsWith(BleConstants.deviceNamePrefix);
-            }),
-          );
-        notifyListeners();
+          ..addAll(filtered);
+        _notifyListeners();
         onDeviceFound?.call(_scanResults);
       });
 
-      _isScanningSub = FlutterBluePlus.isScanning.listen((scanning) {
+      _isScanningSubscription = _adapter.isScanning.listen((scanning) {
         if (!scanning && _isScanning) {
           _isScanning = false;
           AppLogger.info(
             'Scan finished: ${_scanResults.length} device(s) found',
             category: 'BLE',
           );
-          notifyListeners();
-          _cancelScanSubscriptions();
+          _notifyListeners();
+
+          if (_scanResults.isEmpty &&
+              !_isConnected &&
+              !_fallbackScanAttempted) {
+            _fallbackScanAttempted = true;
+            unawaited(_startFallbackScan());
+          }
         }
       });
+    } catch (e) {
+      _isScanning = false;
+      _notifyListeners();
+      _emitError(BleErrorCode.scanError, detail: e.toString());
+    }
+  }
 
-      await FlutterBluePlus.startScan(
+  Future<void> _startFallbackScan() async {
+    if (!await _adapter.isBluetoothEnabled()) {
+      _emitError(BleErrorCode.bluetoothOff);
+      return;
+    }
+
+    try {
+      _isScanning = true;
+      _notifyListeners();
+
+      await _adapter.startScan(
         timeout: Duration(milliseconds: BleConstants.scanTimeoutMs),
       );
     } catch (e) {
       _isScanning = false;
-      await _cancelScanSubscriptions();
-      notifyListeners();
-      _emitError('Scan error: $e');
+      _notifyListeners();
+      _emitError(BleErrorCode.fallbackScanError, detail: e.toString());
     }
   }
 
-  /// Requests runtime BLE permissions on Android.
-  /// iOS prompts automatically on first Bluetooth use.
-  Future<bool> _requestBlePermissions() async {
-    final statuses = await [
-      Permission.bluetoothScan,
-      Permission.bluetoothConnect,
-      // Required for scanning on Android 11 and below; on Android 12+ the
-      // manifest opts out via neverForLocation, so a denial is acceptable.
-      Permission.locationWhenInUse,
-    ].request();
+  bool _shouldKeepDevice(ScanResult result) {
+    final name = result.device.platformName;
+    if (name.isNotEmpty && name.startsWith(BleConstants.deviceNamePrefix)) {
+      return true;
+    }
 
-    final scan = statuses[Permission.bluetoothScan];
-    final connect = statuses[Permission.bluetoothConnect];
-    final location = statuses[Permission.locationWhenInUse];
-
-    final modern = (scan?.isGranted ?? false) && (connect?.isGranted ?? false);
-    final legacy = location?.isGranted ?? false;
-    final granted = modern || legacy;
-    AppLogger.info(
-      'BLE permissions ${granted ? "granted" : "denied"} '
-      '(scan=$scan connect=$connect location=$location)',
-      category: 'BLE',
-    );
-    return granted;
+    final serviceUuids = result.advertisementData.serviceUuids;
+    return serviceUuids.contains(Guid(BleConstants.serviceUuid));
   }
 
   Future<void> stopScan() async {
+    await _cancelScanSubscriptions();
     try {
-      await FlutterBluePlus.stopScan();
+      await _adapter.stopScan();
     } catch (e) {
       AppLogger.warn('Stop scan failed: $e', category: 'BLE');
     }
     _isScanning = false;
-    await _cancelScanSubscriptions();
-    notifyListeners();
+    _notifyListeners();
   }
 
   Future<void> _cancelScanSubscriptions() async {
-    await _scanResultsSub?.cancel();
-    _scanResultsSub = null;
-    await _isScanningSub?.cancel();
-    _isScanningSub = null;
+    await _scanResultsSubscription?.cancel();
+    await _isScanningSubscription?.cancel();
+    _scanResultsSubscription = null;
+    _isScanningSubscription = null;
   }
 
   // ---- Connection ----
   Future<void> connect(BluetoothDevice device) async {
-    if (_isConnected || _isConnecting) {
-      AppLogger.info(
-        'Connect skipped: already connected/connecting',
-        category: 'BLE',
-      );
+    if (_isConnected) {
+      AppLogger.info('Connect skipped: already connected', category: 'BLE');
       return;
     }
     await stopScan();
 
-    _isConnecting = true;
-    notifyListeners();
+    if (!await _adapter.isBluetoothEnabled()) {
+      _emitError(BleErrorCode.bluetoothOff);
+      return;
+    }
 
     try {
-      await device.connect(
+      final connection = await _adapter.connectDevice(
+        device,
         timeout: Duration(milliseconds: BleConstants.connectTimeoutMs),
+        serviceUuid: Guid(BleConstants.serviceUuid),
+        controlUuid: Guid(BleConstants.controlUuid),
+        statusUuid: Guid(BleConstants.statusUuid),
+        logUuid: Guid(BleConstants.logUuid),
       );
-      _connectedDevice = device;
 
-      // Discover services
-      final services = await device.discoverServices();
-
-      for (final service in services) {
-        if (service.uuid.toString() == BleConstants.serviceUuid) {
-          for (final char in service.characteristics) {
-            final uuid = char.uuid.toString();
-            if (uuid == BleConstants.controlUuid) {
-              _controlChar = char;
-            } else if (uuid == BleConstants.statusUuid) {
-              await _enableNotify(char, isStatus: true);
-            } else if (uuid == BleConstants.logUuid) {
-              await _enableNotify(char, isStatus: false);
-            }
-          }
-          break;
-        }
-      }
+      await _attachConnection(connection);
 
       _isConnected = true;
-      AppLogger.info(
-        'Connected to ${device.platformName} (${device.remoteId})',
-        category: 'BLE',
-      );
-
-      // Detect unexpected disconnects from the device side
-      _connectionStateSub = device.connectionState.listen((state) {
-        if (state == BluetoothConnectionState.disconnected) {
-          _handleRemoteDisconnect();
-        }
-      });
-
-      notifyListeners();
+      AppLogger.info('Connected to $_connectedDeviceLabel', category: 'BLE');
+      _notifyListeners();
       onConnectionChanged?.call(true);
 
-      // Get initial status
-      sendCommand(BleConstants.cmdGetStatus);
+      sendCommand(BleConstants.cmdGetStatus, reportError: false);
       _startStatusPolling();
     } catch (e) {
-      _emitError('Connection failed: $e');
-      await disconnect();
+      _isConnected = false;
+      _notifyListeners();
       onConnectionChanged?.call(false);
-    } finally {
-      _isConnecting = false;
-      notifyListeners();
+      _emitError(BleErrorCode.connectionFailed, detail: e.toString());
+      await disconnect();
     }
   }
 
-  void _handleRemoteDisconnect() {
-    if (!_isConnected) return;
-    _emitError(errConnectionLost);
-    disconnect();
+  Future<void> _attachConnection(BleDeviceConnection connection) async {
+    _connectedDevice = connection.device;
+    _connectedDeviceLabel = connection.deviceLabel;
+    _writeControl = connection.writeControl;
+
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = connection.connectionState.listen((state) {
+      if (state == BluetoothConnectionState.disconnected) {
+        _handleUnexpectedDisconnect();
+      }
+    });
+
+    await _cancelNotifySubscriptions();
+    _notifySubscriptions.add(
+      connection.statusNotifications.listen((value) {
+        if (value.isEmpty) return;
+        final data = utf8.decode(value).trim();
+        unawaited(_processNotifyValue(data: data, isStatus: true));
+      }),
+    );
+    _notifySubscriptions.add(
+      connection.logNotifications.listen((value) {
+        if (value.isEmpty) return;
+        final data = utf8.decode(value).trim();
+        unawaited(_processNotifyValue(data: data, isStatus: false));
+      }),
+    );
   }
 
   Future<void> disconnect() async {
@@ -242,76 +266,154 @@ class BleService extends ChangeNotifier {
     _stopStatusPolling();
     _isConnected = false;
 
-    await _connectionStateSub?.cancel();
-    _connectionStateSub = null;
-    for (final sub in _notifySubs) {
-      await sub.cancel();
-    }
-    _notifySubs.clear();
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = null;
+    await _cancelNotifySubscriptions();
 
+    final device = _connectedDevice;
     try {
-      await _connectedDevice?.disconnect();
+      if (device != null) {
+        await _adapter.disconnectDevice(device);
+      }
     } catch (e) {
       AppLogger.warn('Device disconnect failed: $e', category: 'BLE');
     }
 
     _connectedDevice = null;
-    _controlChar = null;
+    _writeControl = null;
+    _connectedDeviceLabel = '';
 
     if (wasConnected) AppLogger.info('Disconnected', category: 'BLE');
 
-    notifyListeners();
-    if (wasConnected) onConnectionChanged?.call(false);
+    _notifyListeners();
+    onConnectionChanged?.call(false);
+  }
+
+  /// Stops scanning and disconnects before leaving the control screen.
+  Future<void> prepareForExit() async {
+    if (_released) return;
+    _released = true;
+
+    await stopScan();
+    await disconnect();
+    await ensureDisconnected();
+  }
+
+  /// Clears any lingering app-level BLE connections before scanning.
+  static Future<void> ensureDisconnected() async {
+    if (!platformCallsEnabled) return;
+    await const FlutterBlueBleAdapter().ensureDisconnected();
+  }
+
+  void _handleUnexpectedDisconnect() {
+    if (!_isConnected) return;
+
+    _stopStatusPolling();
+    _isConnected = false;
+    _connectedDevice = null;
+    _writeControl = null;
+    _connectedDeviceLabel = '';
+
+    unawaited(_connectionSubscription?.cancel());
+    _connectionSubscription = null;
+    unawaited(_cancelNotifySubscriptions());
+
+    _notifyListeners();
+    onConnectionChanged?.call(false);
+    _emitError(BleErrorCode.connectionLost);
   }
 
   // ---- Notifications ----
-  Future<void> _enableNotify(
-    BluetoothCharacteristic char, {
+  Future<void> _recordLog({
+    required String direction,
+    required String message,
+  }) async {
+    final recorder = _logRecorder;
+    if (recorder != null) {
+      await recorder(
+        direction: direction,
+        message: message,
+        device: _connectedDeviceLabel,
+      );
+      onLogInserted?.call();
+      return;
+    }
+
+    await _db.insertLog(
+      direction: direction,
+      message: message,
+      device: _connectedDeviceLabel,
+    );
+    onLogInserted?.call();
+  }
+
+  Future<void> _processNotifyValue({
+    required String data,
     required bool isStatus,
   }) async {
-    await char.setNotifyValue(true);
-    _notifySubs.add(
-      char.lastValueStream.listen((value) {
-        if (value.isNotEmpty) {
-          final data = utf8.decode(value);
-          _db.insertLog(direction: 'IN', message: data);
-          if (isStatus) {
-            final state = StatusParser.parse(data);
-            if (!state.hasTemperature && !state.hasSpeed && !state.hasStatus) {
-              AppLogger.warn(
-                'Unrecognized status payload: "$data"',
-                category: 'BLE',
-              );
-            }
-            onStatusUpdate?.call(state);
-          }
-        }
-      }),
-    );
+    if (data.isEmpty) return;
+
+    try {
+      await _recordLog(direction: 'IN', message: data);
+    } catch (e) {
+      debugPrint('Failed to record IN log: $e');
+      return;
+    }
+
+    if (isStatus) {
+      final state = StatusParser.parse(data);
+      if (!state.hasTemperature && !state.hasSpeed && !state.hasStatus) {
+        AppLogger.warn(
+          'Unrecognized status payload: "$data"',
+          category: 'BLE',
+        );
+      }
+      onStatusUpdate?.call(state);
+    }
+  }
+
+  Future<void> _cancelNotifySubscriptions() async {
+    for (final subscription in _notifySubscriptions) {
+      await subscription.cancel();
+    }
+    _notifySubscriptions.clear();
   }
 
   // ---- Commands ----
-  Future<void> sendCommand(String command) async {
-    if (_controlChar == null || !_isConnected) {
-      _emitError(errNotConnected);
-      return;
+  Future<bool> sendCommand(
+    String command, {
+    bool reportError = true,
+  }) async {
+    if (_writeControl == null || !_isConnected) {
+      if (reportError) {
+        _emitError(BleErrorCode.notConnected);
+      }
+      return false;
     }
 
     try {
       final bytes = utf8.encode('$command\n');
-      await _controlChar!.write(bytes);
-      _db.insertLog(direction: 'OUT', message: command);
+      await _writeControl!(bytes);
+      try {
+        await _recordLog(direction: 'OUT', message: command);
+      } catch (e) {
+        debugPrint('Failed to record OUT log: $e');
+      }
+      return true;
     } catch (e) {
-      _emitError('Send failed: $e');
+      if (reportError) {
+        _emitError(BleErrorCode.sendFailed, detail: e.toString());
+      }
+      return false;
     }
   }
 
-  Future<void> sendTemperature(int temp) async {
-    await sendCommand('${BleConstants.cmdSetTempPrefix}$temp');
+  Future<bool> sendTemperature(int temp) async {
+    return sendCommand('${BleConstants.cmdSetTempPrefix}$temp');
   }
 
-  Future<void> sendSpeed(int speed) async {
-    await sendCommand('${BleConstants.cmdSetSpeedPrefix}$speed');
+  Future<bool> sendSpeed(int speed) async {
+    return sendCommand('${BleConstants.cmdSetSpeedPrefix}$speed');
   }
 
   // ---- Status Polling ----
@@ -321,7 +423,7 @@ class BleService extends ChangeNotifier {
       Duration(milliseconds: BleConstants.statusPollIntervalMs),
       (_) {
         if (_isConnected) {
-          sendCommand(BleConstants.cmdGetStatus);
+          sendCommand(BleConstants.cmdGetStatus, reportError: false);
         }
       },
     );
@@ -332,16 +434,34 @@ class BleService extends ChangeNotifier {
     _statusPollTimer = null;
   }
 
-  void _emitError(String msg) {
-    AppLogger.error(msg, category: 'BLE');
-    onError?.call(msg);
+  void _emitError(BleErrorCode code, {String? detail}) {
+    AppLogger.error(
+      detail != null ? '${code.name}: $detail' : code.name,
+      category: 'BLE',
+    );
+    onError?.call(code, detail: detail);
   }
 
+  void _notifyListeners() {
+    if (!hasListeners) return;
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  static BleService createForTesting({
+    required BleAdapter adapter,
+    BleLogRecorder? logRecorder,
+  }) {
+    return BleService(adapter: adapter, logRecorder: logRecorder);
+  }
+
+  /// Synchronous teardown only. Call [prepareForExit] and await it before
+  /// disposing when a BLE session may still be active.
   @override
   void dispose() {
     _stopStatusPolling();
-    _cancelScanSubscriptions();
-    disconnect();
+    clearUiCallbacks();
+    onLogInserted = null;
     super.dispose();
   }
 }
@@ -354,7 +474,6 @@ class StatusParser {
     final state = MachineState();
     if (raw.isEmpty) return state;
 
-    // Sanitize: remove null chars and control characters
     final sanitized = raw
         .replaceAll('\u0000', '')
         .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')

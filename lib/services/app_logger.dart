@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 import '../models/log_entry.dart';
 import 'database_service.dart';
 
@@ -7,6 +9,10 @@ import 'database_service.dart';
 /// Fire-and-forget: logging never throws and never blocks the caller.
 class AppLogger {
   AppLogger._();
+
+  /// When false, log writes are skipped entirely (widget tests).
+  @visibleForTesting
+  static bool enabled = true;
 
   static final DatabaseService _db = DatabaseService();
 
@@ -20,6 +26,7 @@ class AppLogger {
       _write(message, LogEntry.levelError, category);
 
   static void _write(String message, String level, String category) {
+    if (!enabled) return;
     _db
         .insertLog(
           direction: '',

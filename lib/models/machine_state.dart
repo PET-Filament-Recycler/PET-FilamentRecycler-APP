@@ -24,4 +24,16 @@ class MachineState {
     speed = -1;
     status = statusUnknown;
   }
+  /// 只把新狀態裡「有值」的欄位合併進來，保留其餘舊值。
+  void applyFrom(MachineState other) {
+    if (other.hasTemperature) {
+      temperature = other.temperature;
+    }
+    if (other.hasSpeed) {
+      speed = other.speed;
+    }
+    if (other.hasStatus) {
+      status = other.status;
+    }
+  }
 }
