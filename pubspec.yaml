@@ -42,6 +42,8 @@ dependencies:
   # Pinned <13.0.0: permission_handler_android 14.x requires compileSdk 37,
   # but only the minor-versioned android-37.0 platform is installed locally.
   permission_handler: ^12.0.0
+  share_plus: ^13.3.0
+  sqflite_common_ffi: ^2.4.2+1
 
 dev_dependencies:
   flutter_test:

@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../services/ble_service.dart';
+import '../services/app_logger.dart';
 import '../services/locale_service.dart';
 import '../models/ble_constants.dart';
 import '../models/machine_state.dart';
@@ -49,6 +50,7 @@ class _ControlScreenState extends State<ControlScreen> {
   void _startScan() {
     if (!_ble.isConnected) {
       setState(() => _errorMsg = '');
+      AppLogger.info('Scan started', category: 'UI');
       _ble.startScan();
     }
   }
@@ -56,10 +58,16 @@ class _ControlScreenState extends State<ControlScreen> {
   Future<void> _connect() async {
     if (_selectedDevice == null) return;
     setState(() => _errorMsg = '');
+    AppLogger.info(
+      'Connect pressed: ${_selectedDevice!.device.platformName} '
+      '(${_selectedDevice!.device.remoteId})',
+      category: 'UI',
+    );
     await _ble.connect(_selectedDevice!.device);
   }
 
   Future<void> _disconnect() async {
+    AppLogger.info('Disconnect pressed', category: 'UI');
     await _ble.disconnect();
     setState(() {
       _machineState.reset();
@@ -73,6 +81,7 @@ class _ControlScreenState extends State<ControlScreen> {
     final speedText = _speedCtrl.text.trim();
 
     if (tempText.isEmpty || speedText.isEmpty) {
+      AppLogger.warn('Save pressed with empty input', category: 'UI');
       _showSnack(strings.enterTempAndSpeed);
       return;
     }
@@ -81,22 +90,29 @@ class _ControlScreenState extends State<ControlScreen> {
     final speed = int.tryParse(speedText);
 
     if (temp == null || speed == null) {
+      AppLogger.warn(
+        'Invalid input: temp="$tempText" speed="$speedText"',
+        category: 'UI',
+      );
       _showSnack(strings.invalidNumber);
       return;
     }
     if (temp < BleConstants.tempMin || temp > BleConstants.tempMax) {
+      AppLogger.warn('Temperature out of range: $temp', category: 'UI');
       _showSnack(
         strings.tempRangeError(BleConstants.tempMin, BleConstants.tempMax),
       );
       return;
     }
     if (speed < BleConstants.speedMin || speed > BleConstants.speedMax) {
+      AppLogger.warn('Speed out of range: $speed', category: 'UI');
       _showSnack(
         strings.speedRangeError(BleConstants.speedMin, BleConstants.speedMax),
       );
       return;
     }
 
+    AppLogger.info('Settings sent: temp=$temp speed=$speed', category: 'UI');
     _ble.sendTemperature(temp);
     Future.delayed(const Duration(milliseconds: 250), () {
       _ble.sendSpeed(speed);
@@ -130,6 +146,7 @@ class _ControlScreenState extends State<ControlScreen> {
 
   @override
   void dispose() {
+    AppLogger.info('Control screen closed', category: 'UI');
     _ble.dispose();
     _tempCtrl.dispose();
     _speedCtrl.dispose();
@@ -149,7 +166,13 @@ class _ControlScreenState extends State<ControlScreen> {
           IconButton(
             icon: Icon(locale.isZh ? Icons.language : Icons.language_outlined),
             tooltip: locale.isZh ? 'Switch to English' : '切換至中文',
-            onPressed: () => locale.toggle(),
+            onPressed: () {
+              AppLogger.info(
+                'Language toggled to ${locale.isZh ? "en" : "zh"}',
+                category: 'UI',
+              );
+              locale.toggle();
+            },
           ),
         ],
       ),
@@ -252,7 +275,16 @@ class _ControlScreenState extends State<ControlScreen> {
             }).toList(),
             onChanged: busy
                 ? null
-                : (val) => setState(() => _selectedDevice = val),
+                : (val) {
+                    if (val != null) {
+                      AppLogger.info(
+                        'Device selected: ${val.device.platformName} '
+                        '(${val.device.remoteId})',
+                        category: 'UI',
+                      );
+                    }
+                    setState(() => _selectedDevice = val);
+                  },
             decoration: const InputDecoration(
               border: OutlineInputBorder(),
               contentPadding: EdgeInsets.symmetric(
@@ -376,7 +408,10 @@ class _ControlScreenState extends State<ControlScreen> {
       children: [
         Expanded(
           child: FilledButton.icon(
-            onPressed: () => _ble.sendCommand(BleConstants.cmdStart),
+            onPressed: () {
+              AppLogger.info('START pressed', category: 'UI');
+              _ble.sendCommand(BleConstants.cmdStart);
+            },
             icon: const Icon(Icons.play_arrow),
             label: Text(strings.start),
             style: FilledButton.styleFrom(
@@ -389,7 +424,10 @@ class _ControlScreenState extends State<ControlScreen> {
         const SizedBox(width: 8),
         Expanded(
           child: FilledButton.icon(
-            onPressed: () => _ble.sendCommand(BleConstants.cmdStop),
+            onPressed: () {
+              AppLogger.info('STOP pressed', category: 'UI');
+              _ble.sendCommand(BleConstants.cmdStop);
+            },
             icon: const Icon(Icons.stop),
             label: Text(strings.stop),
             style: FilledButton.styleFrom(
@@ -413,6 +451,7 @@ class _ControlScreenState extends State<ControlScreen> {
         const SizedBox(width: 8),
         IconButton(
           onPressed: () {
+            AppLogger.info('Opened log screen', category: 'UI');
             Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const LogScreen()),
