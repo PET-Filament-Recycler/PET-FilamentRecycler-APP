@@ -6,6 +6,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../models/ble_constants.dart';
 import '../models/machine_state.dart';
+import 'app_logger.dart';
 import 'database_service.dart';
 
 /// Callback interface for BLE events.
@@ -53,7 +54,15 @@ class BleService extends ChangeNotifier {
 
   // ---- Scanning ----
   Future<void> startScan() async {
-    if (_isScanning || _isConnected || _isConnecting) return;
+    if (_isScanning || _isConnected || _isConnecting) {
+      AppLogger.info(
+        'Scan skipped '
+        '(scanning=$_isScanning connected=$_isConnected '
+        'connecting=$_isConnecting)',
+        category: 'BLE',
+      );
+      return;
+    }
 
     await _cancelScanSubscriptions();
 
@@ -90,6 +99,10 @@ class BleService extends ChangeNotifier {
       _isScanningSub = FlutterBluePlus.isScanning.listen((scanning) {
         if (!scanning && _isScanning) {
           _isScanning = false;
+          AppLogger.info(
+            'Scan finished: ${_scanResults.length} device(s) found',
+            category: 'BLE',
+          );
           notifyListeners();
           _cancelScanSubscriptions();
         }
@@ -123,13 +136,21 @@ class BleService extends ChangeNotifier {
 
     final modern = (scan?.isGranted ?? false) && (connect?.isGranted ?? false);
     final legacy = location?.isGranted ?? false;
-    return modern || legacy;
+    final granted = modern || legacy;
+    AppLogger.info(
+      'BLE permissions ${granted ? "granted" : "denied"} '
+      '(scan=$scan connect=$connect location=$location)',
+      category: 'BLE',
+    );
+    return granted;
   }
 
   Future<void> stopScan() async {
     try {
       await FlutterBluePlus.stopScan();
-    } catch (_) {}
+    } catch (e) {
+      AppLogger.warn('Stop scan failed: $e', category: 'BLE');
+    }
     _isScanning = false;
     await _cancelScanSubscriptions();
     notifyListeners();
@@ -144,7 +165,13 @@ class BleService extends ChangeNotifier {
 
   // ---- Connection ----
   Future<void> connect(BluetoothDevice device) async {
-    if (_isConnected || _isConnecting) return;
+    if (_isConnected || _isConnecting) {
+      AppLogger.info(
+        'Connect skipped: already connected/connecting',
+        category: 'BLE',
+      );
+      return;
+    }
     await stopScan();
 
     _isConnecting = true;
@@ -176,6 +203,10 @@ class BleService extends ChangeNotifier {
       }
 
       _isConnected = true;
+      AppLogger.info(
+        'Connected to ${device.platformName} (${device.remoteId})',
+        category: 'BLE',
+      );
 
       // Detect unexpected disconnects from the device side
       _connectionStateSub = device.connectionState.listen((state) {
@@ -220,10 +251,14 @@ class BleService extends ChangeNotifier {
 
     try {
       await _connectedDevice?.disconnect();
-    } catch (_) {}
+    } catch (e) {
+      AppLogger.warn('Device disconnect failed: $e', category: 'BLE');
+    }
 
     _connectedDevice = null;
     _controlChar = null;
+
+    if (wasConnected) AppLogger.info('Disconnected', category: 'BLE');
 
     notifyListeners();
     if (wasConnected) onConnectionChanged?.call(false);
@@ -240,7 +275,16 @@ class BleService extends ChangeNotifier {
         if (value.isNotEmpty) {
           final data = utf8.decode(value);
           _db.insertLog(direction: 'IN', message: data);
-          if (isStatus) onStatusUpdate?.call(StatusParser.parse(data));
+          if (isStatus) {
+            final state = StatusParser.parse(data);
+            if (!state.hasTemperature && !state.hasSpeed && !state.hasStatus) {
+              AppLogger.warn(
+                'Unrecognized status payload: "$data"',
+                category: 'BLE',
+              );
+            }
+            onStatusUpdate?.call(state);
+          }
         }
       }),
     );
@@ -289,6 +333,7 @@ class BleService extends ChangeNotifier {
   }
 
   void _emitError(String msg) {
+    AppLogger.error(msg, category: 'BLE');
     onError?.call(msg);
   }
 
